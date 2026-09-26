@@ -271,9 +271,11 @@ sub handle_connection {
 
             last if !defined $n || $n == 0;  # Error or EOF
 
-            # Feed data to session
-            eval { $session->mem_recv($buf) };
-            # Ignore errors - nghttp2 handles protocol violations
+            # Feed data to session. Fatal receive errors leave no usable
+            # HTTP/2 session; protocol errors that nghttp2 can report on the
+            # wire are handled without throwing here.
+            my $received = eval { $session->mem_recv($buf); 1 };
+            last unless $received;
 
             # Immediately flush any response data (including error frames)
             while (1) {
