@@ -1,0 +1,73 @@
+name: h2spec baseline
+
+on:
+  push:
+    branches:
+      - experiment/h2spec-current-baseline
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cpanminus libnghttp2-dev
+          cpanm --notest --installdeps .
+
+      - name: Build and test
+        run: |
+          perl Makefile.PL
+          make
+          make test
+
+      - name: Run h2spec against bundled server
+        run: |
+          set -euo pipefail
+          H2SPEC_VERSION=2.6.0
+          mkdir -p "$RUNNER_TEMP/h2spec"
+          curl --fail --location --silent --show-error \
+            "https://github.com/summerwind/h2spec/releases/download/v$H2SPEC_VERSION/h2spec_linux_amd64.tar.gz" \
+            --output "$RUNNER_TEMP/h2spec.tar.gz"
+          tar -xzf "$RUNNER_TEMP/h2spec.tar.gz" -C "$RUNNER_TEMP/h2spec"
+
+          perl -Mblib bin/h2spec-server 18080 >"$RUNNER_TEMP/server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 100); do
+            if (echo > /dev/tcp/127.0.0.1/18080) 2>/dev/null; then
+              break
+            fi
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              cat "$RUNNER_TEMP/server.log"
+              exit 1
+            fi
+            sleep 0.1
+          done
+
+          set +e
+          "$RUNNER_TEMP/h2spec/h2spec" -h 127.0.0.1 -p 18080 2>&1 | tee "$RUNNER_TEMP/h2spec.log"
+          STATUS=${PIPESTATUS[0]}
+          set -e
+
+          echo "H2SPEC_EXIT_STATUS=$STATUS"
+          echo "===== failure summary ====="
+          awk '/^Failures:/{capture=1} capture{print}' "$RUNNER_TEMP/h2spec.log"
+          echo "===== server log ====="
+          cat "$RUNNER_TEMP/server.log"
+
+          kill "$SERVER_PID" 2>/dev/null || true
+          wait "$SERVER_PID" 2>/dev/null || true
+          trap - EXIT
+
+      - name: Upload h2spec log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2spec-current-baseline
+          path: |
+            ${{ runner.temp }}/h2spec.log
+            ${{ runner.temp }}/server.log
