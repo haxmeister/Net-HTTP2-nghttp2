@@ -116,7 +116,7 @@ subtest 'the callback is optional' => sub {
         'the stream closes cleanly');
 };
 
-subtest 'rst_stream submitted from inside the callback follows END_STREAM' => sub {
+subtest 'rst_stream submitted from inside the callback is safe after END_STREAM' => sub {
     my (@sent, @wire, @client_frames);
     my ($client, $server, $stream_id, $reset_stream_id);
 
@@ -151,18 +151,35 @@ subtest 'rst_stream submitted from inside the callback follows END_STREAM' => su
     my ($frames) = parse_frames(join '', @wire);
     my @stream_frames = grep { $_->{stream_id} == $stream_id } @$frames;
 
-    is(scalar @stream_frames, 3, 'the wire carries three stream frames');
-    is($stream_frames[1]{type}, FRAME_DATA, 'DATA precedes the reset');
+    # nghttp2 1.69.0 and newer may cancel a queued RST_STREAM if the
+    # stream has disappeared by the time that frame would be serialized.
+    # Older nghttp2 versions serialize the reset submitted from this
+    # on_frame_send callback.  Both outcomes are safe for the binding:
+    # the final DATA must be sent first, and any reset that is emitted
+    # must follow it with the requested error code.
+    ok(@stream_frames == 2 || @stream_frames == 3,
+        'the wire contains the completed response and an optional reset');
+    is($stream_frames[1]{type}, FRAME_DATA, 'DATA is the final response frame');
     ok($stream_frames[1]{flags} & FLAG_END_STREAM, 'that DATA carries END_STREAM');
-    is($stream_frames[2]{type}, FRAME_RST_STREAM, 'RST_STREAM follows END_STREAM');
-    is(unpack('N', $stream_frames[2]{payload}), NGHTTP2_NO_ERROR,
-        'the reset uses NO_ERROR');
 
-    is_deeply(
-        [map { $_->{type} } @client_frames],
-        [FRAME_HEADERS, FRAME_DATA, FRAME_RST_STREAM],
-        'the client sees the reset after the END_STREAM frame',
-    );
+    if (@stream_frames == 3) {
+        is($stream_frames[2]{type}, FRAME_RST_STREAM,
+            'older nghttp2 may serialize RST_STREAM after END_STREAM');
+        is(unpack('N', $stream_frames[2]{payload}), NGHTTP2_NO_ERROR,
+            'the serialized reset uses NO_ERROR');
+        is_deeply(
+            [map { $_->{type} } @client_frames],
+            [FRAME_HEADERS, FRAME_DATA, FRAME_RST_STREAM],
+            'the client sees the reset when nghttp2 serializes it',
+        );
+    }
+    else {
+        is_deeply(
+            [map { $_->{type} } @client_frames],
+            [FRAME_HEADERS, FRAME_DATA],
+            'the client sees the completed response when nghttp2 cancels the reset',
+        );
+    }
 };
 
 done_testing;
